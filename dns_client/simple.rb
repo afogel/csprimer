@@ -27,7 +27,9 @@ class DNSClient
     p 'received message' if message
     header = HeaderParser.new(xid, dns_server_domain, dns_server_port, sender_addrinfo)
     header.parse!(message)
-    ResponseParser.new(header:, message:).parse!
+    p 'header parsed!'
+    response = ResponseParser.new(header:, message:).parse!
+    response.each { |answer| puts answer }
   end
 end
 
@@ -99,12 +101,12 @@ class ResponseParser
     when 'A'
       rd_length = rd_length_raw.unpack("n1").first
       rd_data, _ = extract_data_and_update_index(current_index, rd_length)
-      p rd_data.bytes.join(".")
+      [rd_data.bytes.join(".")]
     when 'NS'
-      header.an_count.times do |_|
+      Array.new(header.an_count) do |_|
         current_index, name, type, rd_class, ttl = parse_rdata(current_index + 1)
         rd_data, current_index = extract_data_and_update_index(current_index, 4)
-        p name
+        name
       end
     end
   end
@@ -183,7 +185,6 @@ class HeaderParser
     @an_count = an_count
     parse_metadata(metadata)
     raise "response XID does not match request XID" if xid != request_xid
-    p 'header parsed'
   end
 
   private
