@@ -23,12 +23,17 @@ class DNSClient
     query = QueryPacker.new(xid:, hostname: ARGV[0], q_type:).pack!
     p 'sending query'
     dns_socket.send(query, 0, dns_server)
-    message, sender_addrinfo = dns_socket.recvfrom(4096)
-    p 'received message' if message
-    header = HeaderParser.new(xid, dns_server_domain, dns_server_port, sender_addrinfo)
-    header.parse!(message)
-    p 'header parsed!'
-    response = ResponseParser.new(header:, message:).parse!
+    an_count, message = [nil, nil]
+    loop do
+      message, sender_addrinfo = dns_socket.recvfrom(4096)
+      header = HeaderParser.new(xid, dns_server_domain, dns_server_port)
+      if header.parse!(message, sender_addrinfo)
+        p 'received response for query'
+        an_count, message = [header.an_count, message]
+        break
+      end
+    end
+    response = ResponseParser.new(message:, an_count:).parse!
     response.each { |answer| puts answer }
   end
 end
@@ -73,6 +78,47 @@ class QueryPacker
   end
 end
 
+class HeaderParser
+  attr_reader :request_xid, :an_count, :dns_server_address, :dns_server_port
+
+  def initialize(request_xid, dns_server_address, dns_server_port)
+    @request_xid = request_xid
+    @dns_server_address = dns_server_address
+    @dns_server_port = dns_server_port
+  end
+
+  def parse!(message, sender_addrinfo)
+    # only need to unpack the first 12 bytes, since that's the standard
+    # query format
+    xid, metadata, qd_count, an_count, ns_count, ar_count = message.unpack("n12") 
+    @an_count = an_count
+    parse_metadata(metadata)
+    response_domain, response_port = sender_addrinfo.inspect_sockaddr.split(":")
+    return xid == request_xid && 
+      dns_server_address == response_domain && 
+      dns_server_port.to_s == response_port.to_s
+  end
+
+  private
+
+  # metadata refers to second set of octects describe in the header fields 
+  # of RFC-1035, Section 4.1.1.
+  # since these individual codes require parsing on a bit-level scale,
+  # this method converts the data to binary and splits the binary string
+  # based on specified boundaries.
+  def parse_metadata(metadata)
+    formatted_metadata = metadata.to_s(2) # convert to binary (base 2)
+    qr = formatted_metadata[0] # qr should be equal to 1, indicating a response
+    opcode = formatted_metadata[1..4] # should be 0, since this is a standard query
+    aa = formatted_metadata[5]
+    tc = formatted_metadata[6]
+    rd = formatted_metadata[7] # should be 1, since we requested it to be used
+    ra = formatted_metadata[8] # should also be 1, since we expect dns servers to have recursion available
+    z = formatted_metadata[9..11]
+    rcode = formatted_metadata[12..15]
+  end
+end
+
 class ResponseParser
   DNS_RECORD_TYPES = {
     1 => "A",
@@ -85,10 +131,10 @@ class ResponseParser
   RDATA_CLASS_TYPES = {
     1 => "IN",
   }
-  attr_reader :message, :header
+  attr_reader :message, :an_count
 
-  def initialize(header:, message:)
-    @header = header
+  def initialize(message:, an_count:)
+    @an_count = an_count
     @message = message
   end
 
@@ -103,7 +149,7 @@ class ResponseParser
       rd_data, _ = extract_data_and_update_index(current_index, rd_length)
       [rd_data.bytes.join(".")]
     when 'NS'
-      Array.new(header.an_count) do |_|
+      Array.new(an_count) do |_|
         current_index, name, type, rd_class, ttl = parse_rdata(current_index + 1)
         rd_data, current_index = extract_data_and_update_index(current_index, 4)
         name
@@ -164,46 +210,6 @@ class ResponseParser
       RDATA_CLASS_TYPES[rd_class&.unpack('n1')&.first],
       ttl&.unpack("L1")&.first,
     ]
-  end
-end
-
-class HeaderParser
-  attr_reader :request_xid, :an_count
-
-  def initialize(request_xid, dns_server_address, dns_server_port, sender_addrinfo)
-    @request_xid = request_xid
-    response_domain, response_port = sender_addrinfo.inspect_sockaddr.split(":")
-    unless dns_server_address == response_domain && dns_server_port.to_s == response_port.to_s
-      raise 'response address and port does not match the query address and port'
-    end
-  end
-
-  def parse!(message)
-    # only need to unpack the first 12 bytes, since that's the standard
-    # query format
-    xid, metadata, qd_count, an_count, ns_count, ar_count = message.unpack("n12") 
-    @an_count = an_count
-    parse_metadata(metadata)
-    raise "response XID does not match request XID" if xid != request_xid
-  end
-
-  private
-
-  # metadata refers to second set of octects describe in the header fields 
-  # of RFC-1035, Section 4.1.1.
-  # since these individual codes require parsing on a bit-level scale,
-  # this method converts the data to binary and splits the binary string
-  # based on specified boundaries.
-  def parse_metadata(metadata)
-    formatted_metadata = metadata.to_s(2) # convert to binary (base 2)
-    qr = formatted_metadata[0] # qr should be equal to 1, indicating a response
-    opcode = formatted_metadata[1..4] # should be 0, since this is a standard query
-    aa = formatted_metadata[5]
-    tc = formatted_metadata[6]
-    rd = formatted_metadata[7] # should be 1, since we requested it to be used
-    ra = formatted_metadata[8] # should also be 1, since we expect dns servers to have recursion available
-    z = formatted_metadata[9..11]
-    rcode = formatted_metadata[12..15]
   end
 end
 
