@@ -136,6 +136,7 @@ class ResponseParser
   def initialize(message:, an_count:)
     @an_count = an_count
     @message = message
+    message
   end
 
   def parse!
@@ -151,7 +152,7 @@ class ResponseParser
     when 'NS'
       Array.new(an_count) do |_|
         current_index, name, type, rd_class, ttl = parse_rdata(current_index + 1)
-        rd_data, current_index = extract_data_and_update_index(current_index, 4)
+        rd_data, current_index = extract_data_and_update_index(current_index, 4) # fails for hackernews.com
         name
       end
     end
